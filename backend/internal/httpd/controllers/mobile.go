@@ -22,6 +22,7 @@ type mobileBridge interface {
 	StartRemoteAccess() (MobileStatusResponse, error)
 	SetSecurePairing(on bool) (MobileStatusResponse, error)
 	SetKeepAwake(on bool) (MobileStatusResponse, error)
+	SetBrowserRemoteAccess(on bool) (MobileStatusResponse, error)
 }
 
 // MobileController exposes the Connect Mobile bridge control endpoints
@@ -113,6 +114,23 @@ func (c *MobileController) KeepAwake(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, http.StatusOK, withWarning(res))
 }
 
+// BrowserRemoteAccess turns paired-device browser viewing and control on or
+// off. Like the other mobile control routes, the LAN listener blocks this
+// route so a phone cannot grant itself access.
+func (c *MobileController) BrowserRemoteAccess(w http.ResponseWriter, r *http.Request) {
+	var body SetBrowserRemoteAccessRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "invalid_request", "MOBILE_BROWSER_CONTROL", "invalid body", nil)
+		return
+	}
+	res, err := c.Bridge.SetBrowserRemoteAccess(body.Enabled)
+	if err != nil {
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "MOBILE_BROWSER_CONTROL", err.Error(), nil)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, withWarning(res))
+}
+
 // LANController is the runtime hook set the concrete bridge needs. httpd's
 // LANManager + authState satisfy it (adapter wired in daemon.go).
 type LANController interface {
@@ -190,6 +208,11 @@ type BridgeService struct {
 	// macOS), which Status reports as unsupported.
 	KeepAwake KeepAwakeController
 
+	// OnBrowserRemoteAccessDisabled synchronously revokes live streams when the
+	// desktop turns the additional browser-access gate off. It is nil until the
+	// browser-live service is wired.
+	OnBrowserRemoteAccessDisabled func()
+
 	// transitionMu serializes every operation that changes persisted bridge
 	// state, listener state, or connector state. Status deliberately does not
 	// take it, so a slow listener or connector operation cannot freeze polling.
@@ -236,11 +259,12 @@ func (b *BridgeService) Status() MobileStatusResponse {
 	lan := b.lanHosts()
 	ts := b.tailscaleHosts()
 	res := MobileStatusResponse{
-		Enabled:       enabled,
-		Host:          first(lan),
-		TailscaleHost: first(ts),
-		Port:          b.LAN.BoundPort(),
-		Warning:       mobileUnencryptedWarning,
+		Enabled:             enabled,
+		BrowserRemoteAccess: st.BrowserRemoteAccess,
+		Host:                first(lan),
+		TailscaleHost:       first(ts),
+		Port:                b.LAN.BoundPort(),
+		Warning:             mobileUnencryptedWarning,
 		Endpoints: mobilebridge.Endpoints(mobilebridge.EndpointInputs{
 			LANHosts:       lan,
 			TailscaleHosts: ts,
@@ -259,6 +283,25 @@ func (b *BridgeService) Status() MobileStatusResponse {
 	res.SecurePairing = b.securePairingStatus(st.SecurePairing, enabled)
 	res.KeepAwake = b.keepAwakeStatus(st.KeepAwake)
 	return res
+}
+
+// SetBrowserRemoteAccess persists the explicit browser-content opt-in. Turning
+// it off revokes existing streams before the successful response is returned.
+func (b *BridgeService) SetBrowserRemoteAccess(on bool) (MobileStatusResponse, error) {
+	b.transitionMu.Lock()
+	defer b.transitionMu.Unlock()
+	st, err := mobilebridge.Load(b.ConfigPath)
+	if err != nil {
+		return MobileStatusResponse{}, err
+	}
+	st.BrowserRemoteAccess = on
+	if err := mobilebridge.Save(b.ConfigPath, st); err != nil {
+		return MobileStatusResponse{}, err
+	}
+	if !on && b.OnBrowserRemoteAccessDisabled != nil {
+		b.OnBrowserRemoteAccessDisabled()
+	}
+	return b.Status(), nil
 }
 
 // AdvertisedEndpoints reports how this daemon can currently be reached, for
@@ -493,7 +536,7 @@ func (b *BridgeService) enableWithPasswordLocked(pw string) (MobileStatusRespons
 	}
 	// Preserve the persisted SecurePairing and KeepAwake flags — this Save is not
 	// the place those choices change, only where enabled/password/port do.
-	if err := mobilebridge.Save(b.ConfigPath, mobilebridge.State{Enabled: true, Password: pw, LastPort: port, SecurePairing: prevSt.SecurePairing, KeepAwake: prevSt.KeepAwake}); err != nil {
+	if err := mobilebridge.Save(b.ConfigPath, mobilebridge.State{Enabled: true, Password: pw, LastPort: port, SecurePairing: prevSt.SecurePairing, KeepAwake: prevSt.KeepAwake, BrowserRemoteAccess: prevSt.BrowserRemoteAccess}); err != nil {
 		// Persist failed after the listener came up. Roll back so reality matches
 		// the unchanged persisted state (and the UI's "enable failed"). A rotate on
 		// an already-running listener (wasRunning) keeps serving on the prior hash;
