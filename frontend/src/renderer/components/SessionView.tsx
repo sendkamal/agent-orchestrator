@@ -86,6 +86,7 @@ import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import { apiClient, apiErrorCode, apiErrorMessage } from "../lib/api-client";
 import { sessionWorkspaceFilesQueryOptions } from "../hooks/useSessionWorkspaceFiles";
 import { matchWorkspaceFilePath } from "../lib/workspace-file-path";
+import { markFileViewerPerformance } from "../lib/file-viewer-performance";
 import { aoBridge } from "../lib/bridge";
 import {
 	capturePendingFileAttachmentsForSession,
@@ -2015,6 +2016,7 @@ export function SessionView({ sessionId, cloudOrgId, projectId }: SessionViewPro
 	);
 
 	const handleOpenFiles = useCallback(() => {
+		markFileViewerPerformance("files-click");
 		prepareFilesInspector();
 		void fetchWorkspaceFiles();
 	}, [fetchWorkspaceFiles, prepareFilesInspector]);

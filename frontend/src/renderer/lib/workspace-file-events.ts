@@ -20,6 +20,7 @@ type WorkspaceStream = {
 	 * so would inflate the backoff exponent past what we actually retried.
 	 */
 	retries: number;
+	lastVersion?: string;
 	source?: EventSource;
 	sourceBaseUrl?: string;
 	debounce?: ReturnType<typeof setTimeout>;
@@ -86,6 +87,7 @@ function createWorkspaceStream(sessionId: string, queryClient: QueryClient): Wor
 		stream.debounce = setTimeout(() => {
 			void queryClient.invalidateQueries({ queryKey: ["workspace-file-paths", sessionId] });
 			void queryClient.invalidateQueries({ queryKey: ["session-workspace-files", sessionId] });
+			void queryClient.invalidateQueries({ queryKey: ["session-workspace-history", sessionId] });
 			void queryClient.invalidateQueries({ queryKey: ["session-workspace-file", sessionId] });
 			void queryClient.invalidateQueries({ queryKey: ["session-workspace-file-revision", sessionId] });
 			void queryClient.invalidateQueries({ queryKey: ["session-workspace-diffs", sessionId] });
@@ -174,8 +176,23 @@ function createWorkspaceStream(sessionId: string, queryClient: QueryClient): Wor
 				stream.failures += 1;
 				setWorkspaceFileConnectionState(sessionId, stream.failures >= 3 ? "degraded" : "connecting");
 			};
-			source.addEventListener("workspace_changed", () => {
-				if (!stream.disposed && generation === stream.generation && stream.source === source) invalidate();
+			source.addEventListener("workspace_changed", (event) => {
+				if (stream.disposed || generation !== stream.generation || stream.source !== source) return;
+				let payload: { kind?: string; workspaceVersion?: string } = {};
+				try {
+					payload = JSON.parse((event as MessageEvent<string>).data || "{}") as typeof payload;
+				} catch {
+					// Older daemons emitted an untyped invalidation edge. Preserve that
+					// compatibility path instead of dropping the refresh.
+				}
+				if (payload.kind === "dirty") return;
+				if (payload.kind === "version" && payload.workspaceVersion) {
+					if (stream.lastVersion === payload.workspaceVersion) return;
+					stream.lastVersion = payload.workspaceVersion;
+					const cached = queryClient.getQueryData<{ workspaceVersion?: string }>(["session-workspace-files", sessionId]);
+					if (cached?.workspaceVersion === payload.workspaceVersion) return;
+				}
+				invalidate();
 			});
 		} catch {
 			stream.source = undefined;

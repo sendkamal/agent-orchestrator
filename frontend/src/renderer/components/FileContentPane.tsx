@@ -15,6 +15,7 @@ import {
 } from "../hooks/useSessionWorkspaceFiles";
 import { usePierreFileHighlightReady } from "../hooks/usePierreFileHighlight";
 import { cn } from "../lib/utils";
+import { markFileViewerPerformance } from "../lib/file-viewer-performance";
 import { statusLabel, statusTone } from "../lib/workspace-file-status";
 import {
 	canSplitCompare,
@@ -97,6 +98,14 @@ export function FileContentPane({
 	});
 	const hasUnsavedChanges = Boolean(editing && query.data && draft !== query.data.content);
 	useEffect(() => {
+		if (path) markFileViewerPerformance("file-selected");
+	}, [path]);
+	useEffect(() => {
+		if (!query.data) return;
+		markFileViewerPerformance("file-header-painted");
+		markFileViewerPerformance("file-content-painted");
+	}, [query.data]);
+	useEffect(() => {
 		setMode(initialMode);
 		setEditing(initialEditing);
 		setDraft("");
@@ -125,6 +134,7 @@ export function FileContentPane({
 			await queryClient.invalidateQueries({
 				predicate: ({ queryKey }) => [
 					"session-workspace-files",
+					"session-workspace-history",
 					"session-workspace-tree",
 					"session-workspace-search",
 					"session-workspace-file-revision",
